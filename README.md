@@ -52,6 +52,12 @@ The worker accepts the following input parameters:
 | `num_inference_steps`     | `int`   | `25`     | No        | Number of denoising steps for the base model                                                                        |
 | `guidance_scale`          | `float` | `7.5`    | No        | Classifier-Free Guidance scale. Higher values lead to images closer to the prompt, lower values more creative       |
 | `num_images`              | `int`   | `1`      | No        | Number of images to generate per prompt (Constraint: must be 1 or 2)                                                |
+| `reference_images`        | `list`  | `None`   | No        | Optional list of reference image inputs (URL/path/base64 or dict entries). First valid image is used.              |
+| `ref_images`              | `list`  | `None`   | No        | Alias of `reference_images`.                                                                                         |
+| `reference_image_url`     | `str`   | `None`   | No        | Optional single reference image URL.                                                                                 |
+| `reference_image_path`    | `str`   | `None`   | No        | Optional single local reference image path.                                                                          |
+| `reference_image_base64`  | `str`   | `None`   | No        | Optional single reference image as base64/data URL.                                                                  |
+| `reference_strength`      | `float` | `0.7`    | No        | Optional conditioning strength when pipeline supports `image` + `strength`.                                         |
 
 ### Example Request
 
@@ -64,10 +70,16 @@ The worker accepts the following input parameters:
     "num_inference_steps": 25,
     "guidance_scale": 7.5,
     "seed": 42,
-    "num_images": 1
+    "num_images": 1,
+    "reference_images": [
+      "https://example.com/character_front.png"
+    ],
+    "reference_strength": 0.7
   }
 }
 ```
+
+If a reference image is provided but the loaded pipeline does not expose image-conditioning arguments, the worker logs that condition and falls back to text-only generation.
 
 which is producing an output like this:
 

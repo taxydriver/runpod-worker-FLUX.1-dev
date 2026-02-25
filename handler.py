@@ -1,9 +1,13 @@
 import base64
+import inspect
+import io
 import os
+import urllib.request
 
 import runpod
 import torch
 from pruna import PrunaModel
+from PIL import Image
 from runpod.serverless.utils import rp_cleanup, rp_upload
 from runpod.serverless.utils.rp_validator import validate
 
@@ -47,6 +51,97 @@ def _save_and_upload_images(images, job_id):
 
     rp_cleanup.clean([f"/{job_id}"])
     return image_urls
+
+
+def _safe_float(value, default=0.7):
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _decode_data_or_base64_to_pil(value: str):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    payload = value.strip()
+    if payload.startswith("data:") and "," in payload:
+        payload = payload.split(",", 1)[1]
+    try:
+        raw = base64.b64decode(payload)
+        return Image.open(io.BytesIO(raw)).convert("RGB")
+    except Exception:
+        return None
+
+
+def _load_reference_image_from_candidate(candidate):
+    if candidate is None:
+        return None
+    if not isinstance(candidate, str):
+        return None
+    value = candidate.strip()
+    if not value:
+        return None
+
+    if value.startswith("http://") or value.startswith("https://"):
+        try:
+            with urllib.request.urlopen(value, timeout=30) as response:
+                return Image.open(io.BytesIO(response.read())).convert("RGB")
+        except Exception:
+            return None
+
+    if os.path.exists(value):
+        try:
+            return Image.open(value).convert("RGB")
+        except Exception:
+            return None
+
+    return _decode_data_or_base64_to_pil(value)
+
+
+def _extract_reference_candidates(job_input):
+    candidates = []
+    for key in (
+        "reference_image_url",
+        "reference_image_path",
+        "reference_image_base64",
+        "ref_image_url",
+        "ref_image_path",
+        "ref_image_base64",
+    ):
+        value = job_input.get(key)
+        if isinstance(value, str) and value.strip():
+            candidates.append(value)
+
+    for key in ("reference_images", "ref_images"):
+        values = job_input.get(key)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if isinstance(item, str) and item.strip():
+                candidates.append(item)
+            elif isinstance(item, dict):
+                for alt in (
+                    "url",
+                    "image_url",
+                    "path",
+                    "image_path",
+                    "base64",
+                    "image_base64",
+                    "image",
+                ):
+                    value = item.get(alt)
+                    if isinstance(value, str) and value.strip():
+                        candidates.append(value)
+                        break
+    return candidates
+
+
+def _resolve_reference_image(job_input):
+    for candidate in _extract_reference_candidates(job_input):
+        image = _load_reference_image_from_candidate(candidate)
+        if image is not None:
+            return image, candidate
+    return None, None
 
 
 @torch.inference_mode()
@@ -105,10 +200,51 @@ def generate_image(job):
     # Create generator with proper device handling
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = torch.Generator(device).manual_seed(job_input["seed"])
+    reference_image, reference_source = _resolve_reference_image(job_input)
+    reference_strength = _safe_float(job_input.get("reference_strength", 0.7), 0.7)
+    reference_applied = False
 
     try:
         # Generate image using FLUX.1-dev pipeline
         with torch.inference_mode():
+            call_kwargs = {
+                "prompt": job_input["prompt"],
+                "negative_prompt": job_input["negative_prompt"],
+                "height": job_input["height"],
+                "width": job_input["width"],
+                "num_inference_steps": job_input["num_inference_steps"],
+                "guidance_scale": job_input["guidance_scale"],
+                "num_images_per_prompt": job_input["num_images"],
+                "generator": generator,
+            }
+
+            if reference_image is not None:
+                sig = inspect.signature(MODELS.pipe.__call__)
+                params = sig.parameters
+                if "image" in params:
+                    call_kwargs["image"] = reference_image
+                    if "strength" in params:
+                        call_kwargs["strength"] = reference_strength
+                    reference_applied = True
+                elif "ip_adapter_image" in params:
+                    call_kwargs["ip_adapter_image"] = reference_image
+                    reference_applied = True
+
+                if reference_applied:
+                    print(
+                        f"[generate_image] reference image applied via "
+                        f"{'image' if 'image' in call_kwargs else 'ip_adapter_image'} "
+                        f"(source={reference_source})",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "[generate_image] reference image provided but current "
+                        "pipeline signature has no supported image-conditioning args; "
+                        "running text-only.",
+                        flush=True,
+                    )
+
             result = MODELS.pipe(
                 prompt=job_input["prompt"],
                 negative_prompt=job_input["negative_prompt"],
@@ -118,6 +254,21 @@ def generate_image(job):
                 guidance_scale=job_input["guidance_scale"],
                 num_images_per_prompt=job_input["num_images"],
                 generator=generator,
+                **{
+                    k: v
+                    for k, v in call_kwargs.items()
+                    if k
+                    not in (
+                        "prompt",
+                        "negative_prompt",
+                        "height",
+                        "width",
+                        "num_inference_steps",
+                        "guidance_scale",
+                        "num_images_per_prompt",
+                        "generator",
+                    )
+                },
             )
             output = result.images
     except RuntimeError as err:
@@ -139,6 +290,9 @@ def generate_image(job):
         "images": image_urls,
         "image_url": image_urls[0],
         "seed": job_input["seed"],
+        "reference_used": bool(reference_image is not None),
+        "reference_applied": reference_applied,
+        "reference_source": reference_source,
     }
 
     return results
