@@ -34,8 +34,14 @@ RUN pip3 install -r /requirements.txt
 # copy files
 COPY download_weights.py schemas.py handler.py test_input.json /
 
-# download the weights from hugging face
-RUN python3 /download_weights.py
+# optionally pre-download weights at build time
+# default is off to avoid build failures due to transient HF/network/auth issues
+ARG PRELOAD_WEIGHTS=0
+RUN if [ "$PRELOAD_WEIGHTS" = "1" ]; then \
+      python3 /download_weights.py; \
+    else \
+      echo "Skipping model pre-download at build time (PRELOAD_WEIGHTS=$PRELOAD_WEIGHTS)"; \
+    fi
 
 # run the handler
 CMD python3 -u /handler.py

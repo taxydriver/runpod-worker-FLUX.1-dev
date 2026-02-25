@@ -22,12 +22,25 @@ class ModelHandler:
         self.load_models()
 
     def load_models(self):
-        # Load FLUX.1-dev pipeline from cache using identifier
-
-        self.pipe = PrunaModel.from_hub(
-            os.environ.get("HF_MODEL", "PrunaAI/FLUX.1-dev-smashed-no-compile"),
-            local_files_only=True,
-        )
+        # Load FLUX.1-dev pipeline from local cache first, then fallback to hub.
+        model_id = os.environ.get("HF_MODEL", "PrunaAI/FLUX.1-dev-smashed-no-compile")
+        try:
+            self.pipe = PrunaModel.from_hub(
+                model_id,
+                local_files_only=True,
+            )
+            print(f"[ModelHandler] Loaded model from local cache: {model_id}", flush=True)
+        except Exception as local_err:
+            print(
+                f"[ModelHandler] Local cache load failed for {model_id}: {local_err}. "
+                "Falling back to Hugging Face download...",
+                flush=True,
+            )
+            self.pipe = PrunaModel.from_hub(
+                model_id,
+                local_files_only=False,
+            )
+            print(f"[ModelHandler] Loaded model from Hugging Face: {model_id}", flush=True)
         self.pipe.move_to_device("cuda")
 
 
