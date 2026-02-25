@@ -17,8 +17,8 @@ RUN pip3 install packaging psutil pexpect ipywidgets jupyterlab ipykernel \
 # upgrade pip
 RUN pip3 install --upgrade pip
 
-# install pruna
-RUN pip3 install pruna==0.2.7
+# install pruna (v0.2.7 is not published on PyPI; install from Git tag)
+RUN pip3 install git+https://github.com/PrunaAI/pruna.git@v0.2.7
 
 # install ipython kernel
 RUN python3 -m ipykernel install --user --name pruna_cuda12 --display-name "Python (pruna_cuda12)"
