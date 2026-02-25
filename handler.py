@@ -19,8 +19,7 @@ torch.cuda.empty_cache()
 class ModelHandler:
     def __init__(self):
         self.pipe = None
-        self.load_models()
-
+    
     def load_models(self):
         # Load FLUX.1-dev pipeline from local cache first, then fallback to hub.
         model_id = os.environ.get("HF_MODEL", "PrunaAI/FLUX.1-dev-smashed-no-compile")
@@ -42,9 +41,26 @@ class ModelHandler:
             )
             print(f"[ModelHandler] Loaded model from Hugging Face: {model_id}", flush=True)
         self.pipe.move_to_device("cuda")
+        return self.pipe
 
 
-MODELS = ModelHandler()
+MODELS = None
+MODEL_INIT_ERROR = None
+
+
+def _get_models():
+    global MODELS, MODEL_INIT_ERROR
+    if MODELS is not None:
+        return MODELS
+    try:
+        MODELS = ModelHandler()
+        MODELS.load_models()
+        MODEL_INIT_ERROR = None
+        return MODELS
+    except Exception as e:
+        MODEL_INIT_ERROR = str(e)
+        print(f"[ModelHandler] Initialization failed: {MODEL_INIT_ERROR}", flush=True)
+        return None
 
 
 def _save_and_upload_images(images, job_id):
@@ -178,6 +194,13 @@ def generate_image(job):
     # -------------------------------------------------------------------------
     # Original (strict) behaviour – assume the expected single wrapper exists.
     # -------------------------------------------------------------------------
+    models = _get_models()
+    if models is None:
+        return {
+            "error": f"Model initialization failed: {MODEL_INIT_ERROR}",
+            "refresh_worker": True,
+        }
+
     job_input = job["input"]
 
     print("[generate_image] job['input'] payload:")
@@ -258,7 +281,7 @@ def generate_image(job):
                         flush=True,
                     )
 
-            result = MODELS.pipe(
+            result = models.pipe(
                 prompt=job_input["prompt"],
                 negative_prompt=job_input["negative_prompt"],
                 height=job_input["height"],

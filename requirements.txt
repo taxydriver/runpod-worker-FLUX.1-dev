@@ -12,3 +12,4 @@ huggingface-hub
 hf_transfer
 hf_xet
 setuptools
+pruna==0.2.5
