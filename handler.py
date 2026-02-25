@@ -2,18 +2,44 @@ import base64
 import inspect
 import io
 import os
+import traceback
 import urllib.request
+from contextlib import nullcontext
 
 import runpod
-import torch
-from pruna import PrunaModel
-from PIL import Image
 from runpod.serverless.utils import rp_cleanup, rp_upload
 from runpod.serverless.utils.rp_validator import validate
 
 from schemas import INPUT_SCHEMA
 
-torch.cuda.empty_cache()
+TORCH = None
+PrunaModel = None
+Image = None
+RUNTIME_IMPORT_ERROR = None
+
+
+def _ensure_runtime_imports():
+    global TORCH, PrunaModel, Image, RUNTIME_IMPORT_ERROR
+    if RUNTIME_IMPORT_ERROR is not None:
+        return False
+    if TORCH is not None and PrunaModel is not None and Image is not None:
+        return True
+    try:
+        import torch as _torch
+        from PIL import Image as _Image
+        from pruna import PrunaModel as _PrunaModel
+
+        TORCH = _torch
+        Image = _Image
+        PrunaModel = _PrunaModel
+        if TORCH.cuda.is_available():
+            TORCH.cuda.empty_cache()
+        return True
+    except Exception as err:
+        RUNTIME_IMPORT_ERROR = f"{type(err).__name__}: {err}"
+        print("[runtime] dependency import/init failed", flush=True)
+        traceback.print_exc()
+        return False
 
 
 class ModelHandler:
@@ -21,6 +47,10 @@ class ModelHandler:
         self.pipe = None
     
     def load_models(self):
+        if not _ensure_runtime_imports():
+            raise RuntimeError(
+                f"Runtime imports failed while loading model: {RUNTIME_IMPORT_ERROR}"
+            )
         # Load FLUX.1-dev pipeline from local cache first, then fallback to hub.
         model_id = os.environ.get("HF_MODEL", "PrunaAI/FLUX.1-dev-smashed-no-compile")
         try:
@@ -40,7 +70,8 @@ class ModelHandler:
                 local_files_only=False,
             )
             print(f"[ModelHandler] Loaded model from Hugging Face: {model_id}", flush=True)
-        self.pipe.move_to_device("cuda")
+        device = "cuda" if TORCH.cuda.is_available() else "cpu"
+        self.pipe.move_to_device(device)
         return self.pipe
 
 
@@ -50,6 +81,10 @@ MODEL_INIT_ERROR = None
 
 def _get_models():
     global MODELS, MODEL_INIT_ERROR
+    if not _ensure_runtime_imports():
+        MODEL_INIT_ERROR = f"Runtime imports failed: {RUNTIME_IMPORT_ERROR}"
+        print(f"[ModelHandler] Initialization failed: {MODEL_INIT_ERROR}", flush=True)
+        return None
     if MODELS is not None:
         return MODELS
     try:
@@ -103,6 +138,8 @@ def _decode_data_or_base64_to_pil(value: str):
 
 
 def _load_reference_image_from_candidate(candidate):
+    if Image is None and not _ensure_runtime_imports():
+        return None
     if candidate is None:
         return None
     if not isinstance(candidate, str):
@@ -173,7 +210,6 @@ def _resolve_reference_image(job_input):
     return None, None
 
 
-@torch.inference_mode()
 def generate_image(job):
     """
     Generate an image from text using FLUX.1-dev Model
@@ -194,11 +230,15 @@ def generate_image(job):
     # -------------------------------------------------------------------------
     # Original (strict) behaviour – assume the expected single wrapper exists.
     # -------------------------------------------------------------------------
+    if not _ensure_runtime_imports():
+        return {
+            "error": f"Runtime imports failed: {RUNTIME_IMPORT_ERROR}",
+        }
+
     models = _get_models()
     if models is None:
         return {
             "error": f"Model initialization failed: {MODEL_INIT_ERROR}",
-            "refresh_worker": True,
         }
 
     job_input = job["input"]
@@ -234,15 +274,18 @@ def generate_image(job):
         job_input["seed"] = int.from_bytes(os.urandom(2), "big")
 
     # Create generator with proper device handling
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    generator = torch.Generator(device).manual_seed(job_input["seed"])
+    device = TORCH.device("cuda" if TORCH.cuda.is_available() else "cpu")
+    generator = TORCH.Generator(device).manual_seed(job_input["seed"])
     reference_image, reference_source = _resolve_reference_image(job_input)
     reference_strength = _safe_float(job_input.get("reference_strength", 0.7), 0.7)
     reference_applied = False
 
     try:
         # Generate image using FLUX.1-dev pipeline
-        with torch.inference_mode():
+        inference_context = (
+            TORCH.inference_mode() if hasattr(TORCH, "inference_mode") else nullcontext()
+        )
+        with inference_context:
             call_kwargs = {
                 "prompt": job_input["prompt"],
                 "negative_prompt": job_input["negative_prompt"],
